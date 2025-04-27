@@ -163,87 +163,149 @@ def ussd_callback():
     logging.info(f"USSD Session {session_id}: Received input '{text}' from {phone_number}")
 
     parts = text.split('*')
-    level = len(parts) if text else 0
+    level = len(parts) if parts[0] else 0 # Adjusted level calculation for empty initial input
 
-    materials_list = get_materials() # Renamed to avoid conflict with module name
+    materials_list = get_materials() # Fetch materials list once
 
     try:
         if level == 0:
-            response = "CON Welcome to Construction Tracker\n1. Record Material Received\n2. Check Stock Level"
+            # Updated Main Menu
+            response = "CON Welcome to Construction Tracker\n1. Record Material Received\n2. View All Stock Levels\n3. Record Material Used"
+
         elif level == 1:
             choice = parts[0]
-            if choice in ['1', '2']:
-                if not materials_list:
-                    response = "END No materials found."
+            if choice == '1': # Record Received
+                if not materials_list: response = "END No materials found."
                 else:
-                    response = "CON Select Material:\n"
-                    for i, material in enumerate(materials_list):
-                        response += f"{i+1}. {material['name']}\n"
+                    response = "CON Select Material Received:\n"
+                    for i, material in enumerate(materials_list): response += f"{i+1}. {material['name']}\n"
+            elif choice == '2': # View All Stock
+                all_stock = get_all_material_stock()
+                if not all_stock: response = "END No stock data available."
+                else:
+                    ussd_stock_display = "\n".join([f"{item['name']}: {item['current_quantity']} {item['unit']}" for item in all_stock])
+                    response = "END Current Stock:\n" + ussd_stock_display
+
+                    # Send SMS confirmation to user
+                    if sms and AT_SHORTCODE and phone_number:
+                        sms_message = "Current Stock Levels:\n" + "\n".join([f"{item['name']}: {item['current_quantity']} {item['unit']}" for item in all_stock])
+                        # Truncate if too long for SMS (approx 160 chars per segment)
+                        if len(sms_message) > 300: # Example limit
+                            sms_message = sms_message[:297] + "..."
+                        try:
+                            sms.send(sms_message, [phone_number], AT_SHORTCODE)
+                            logging.info(f"USSD View Stock SMS sent to user {phone_number}.")
+                        except Exception as e:
+                            logging.error(f"Failed to send USSD View Stock SMS to user {phone_number}: {e}")
+            elif choice == '3': # Record Used
+                if not materials_list: response = "END No materials found."
+                else:
+                    response = "CON Select Material Used:\n"
+                    for i, material in enumerate(materials_list): response += f"{i+1}. {material['name']}\n"
             else:
                 response = "END Invalid choice."
+
         elif level == 2:
             main_choice = parts[0]
             try:
                 material_index = int(parts[1]) - 1
                 if 0 <= material_index < len(materials_list):
                     selected_material = materials_list[material_index]
-                    if main_choice == '1': # Record
-                        response = f"CON Enter quantity of {selected_material['name']} ({selected_material['unit']}):"
-                    elif main_choice == '2': # Check
-                        mat_details = get_material_details(selected_material['id'])
-                        response = f"END {mat_details['name']}: {mat_details['current_quantity']} {mat_details['unit']} in stock." if mat_details else "END Error retrieving stock."
+                    if main_choice == '1': # Record Received -> Ask Quantity
+                        response = f"CON Enter quantity of {selected_material['name']} ({selected_material['unit']}) RECEIVED:"
+                    elif main_choice == '3': # Record Used -> Ask Quantity
+                        response = f"CON Enter quantity of {selected_material['name']} ({selected_material['unit']}) USED:"
+                    # No level 2 action for main_choice '2' (View All Stock) as it ends at level 1
                     else:
-                        response = "END Invalid action."
+                        response = "END Invalid action sequence." # Should not happen if menu is correct
                 else:
                     response = "END Invalid material selection."
             except (ValueError, IndexError):
                 response = "END Invalid selection number."
+
         elif level == 3:
             main_choice = parts[0]
             try:
                 material_index = int(parts[1]) - 1
                 quantity_str = parts[2]
-                if main_choice == '1':
-                    if 0 <= material_index < len(materials_list):
-                        selected_material = materials_list[material_index]
-                        if quantity_str.isdigit() and int(quantity_str) > 0:
-                            quantity = int(quantity_str)
-                            if update_material_quantity(selected_material['id'], quantity):
-                                response = f"END {quantity} {selected_material['unit']} of {selected_material['name']} recorded."
-                                # Send SMS Notification (using shared 'sms' object)
-                                stakeholders = get_stakeholder_numbers()
-                                if stakeholders and sms and AT_SHORTCODE:
-                                    message = f"{quantity} {selected_material['unit']} of {selected_material['name']} recorded via USSD by {phone_number}."
-                                    try:
-                                        sms_response = sms.send(message, stakeholders, AT_SHORTCODE)
-                                        logging.info(f"USSD Record SMS notification sent: {sms_response}")
-                                        response += " Stakeholders notified."
-                                    except Exception as e:
-                                        logging.error(f"Failed to send USSD record SMS notification: {e}")
-                                        response += " SMS notification failed."
-                                elif not sms or not AT_SHORTCODE:
-                                    logging.warning("SMS service/shortcode not available for USSD notification.")
-                                    response += " SMS notification disabled."
-                                elif not stakeholders:
-                                    logging.warning("No stakeholders found for USSD notification.")
-                            else:
-                                response = "END DB update failed."
-                        else:
-                            response = "END Invalid quantity."
-                    else:
-                        response = "END Invalid material selection."
-                else:
-                    response = "END Invalid sequence."
-            except (ValueError, IndexError):
-                response = "END Invalid input format."
-        else:
-            response = "END Invalid input."
-    except Exception as e:
-        logging.exception(f"USSD Error: {e}")
-        response = "END Internal error."
 
-    if not isinstance(response, str): response = "END Response error."
-    logging.info(f"USSD Session {session_id}: Sending response '{response[:50]}...'" )
+                if not quantity_str.isdigit() or int(quantity_str) <= 0:
+                     response = "END Invalid quantity. Must be a positive number."
+                elif 0 <= material_index < len(materials_list):
+                    selected_material = materials_list[material_index]
+                    quantity = int(quantity_str)
+
+                    if main_choice == '1': # Record Received -> Update DB
+                        if update_material_quantity(selected_material['id'], quantity):
+                            response = f"END {quantity} {selected_material['unit']} of {selected_material['name']} recorded as RECEIVED."
+                            # Send SMS Notification
+                            stakeholders = get_stakeholder_numbers()
+                            if stakeholders and sms and AT_SHORTCODE:
+                                message = f"RECEIVED: {quantity} {selected_material['unit']} of {selected_material['name']} recorded via USSD by {phone_number}."
+                                try:
+                                    sms_response = sms.send(message, stakeholders, AT_SHORTCODE)
+                                    logging.info(f"USSD Record SMS notification sent: {sms_response}")
+                                    response += " Stakeholders notified."
+                                except Exception as e:
+                                    logging.error(f"Failed to send USSD record SMS notification: {e}")
+                                    response += " SMS notification failed."
+                            # Send confirmation SMS to user
+                            if sms and AT_SHORTCODE and phone_number:
+                                user_sms_message = f"Confirmed: Recorded {quantity} {selected_material['unit']} of {selected_material['name']} received."
+                                try:
+                                    sms.send(user_sms_message, [phone_number], AT_SHORTCODE)
+                                    logging.info(f"USSD Record Received confirmation SMS sent to user {phone_number}.")
+                                except Exception as e:
+                                    logging.error(f"Failed to send USSD Record Received confirmation SMS to user {phone_number}: {e}")
+                        else:
+                            response = "END Failed to update database."
+
+                    elif main_choice == '3': # Record Used -> Check Stock & Update DB
+                        current_details = get_material_details(selected_material['id'])
+                        if not current_details:
+                             response = "END Error checking current stock before usage."
+                        elif quantity > current_details['current_quantity']:
+                             response = f"END Cannot use {quantity} {selected_material['unit']}. Only {current_details['current_quantity']} available."
+                        elif update_material_quantity(selected_material['id'], -quantity): # Use negative quantity
+                            response = f"END {quantity} {selected_material['unit']} of {selected_material['name']} recorded as USED."
+                            # Send SMS Notification for Usage
+                            stakeholders = get_stakeholder_numbers()
+                            if stakeholders and sms and AT_SHORTCODE:
+                                message = f"USED: {quantity} {selected_material['unit']} of {selected_material['name']} recorded via USSD by {phone_number}. Remaining: {current_details['current_quantity'] - quantity}."
+                                try:
+                                    sms_response = sms.send(message, stakeholders, AT_SHORTCODE)
+                                    logging.info(f"USSD Usage SMS notification sent: {sms_response}")
+                                    response += " Stakeholders notified."
+                                except Exception as e:
+                                    logging.error(f"Failed to send USSD usage SMS notification: {e}")
+                                    response += " SMS notification failed."
+                            # Send confirmation SMS to user
+                            if sms and AT_SHORTCODE and phone_number:
+                                remaining_qty = current_details['current_quantity'] - quantity
+                                user_sms_message = f"Confirmed: Recorded {quantity} {selected_material['unit']} of {selected_material['name']} used. Remaining: {remaining_qty}."
+                                try:
+                                    sms.send(user_sms_message, [phone_number], AT_SHORTCODE)
+                                    logging.info(f"USSD Record Used confirmation SMS sent to user {phone_number}.")
+                                except Exception as e:
+                                    logging.error(f"Failed to send USSD Record Used confirmation SMS to user {phone_number}: {e}")
+                        else:
+                            response = "END Failed to update database for usage."
+                    else:
+                         response = "END Invalid action sequence at quantity level."
+                else:
+                    response = "END Invalid material selection."
+            except (ValueError, IndexError):
+                response = "END Invalid input format for quantity."
+        else:
+            # Handles levels > 3, likely invalid input
+            response = "END Too many steps or invalid input."
+
+    except Exception as e:
+        logging.exception(f"USSD Error: {e}") # Log the full traceback
+        response = "END An internal error occurred. Please try again." # Generic error to user
+
+    if not isinstance(response, str): response = "END Error: Invalid response type." # Sanity check
+    logging.info(f"USSD Session {session_id}: Sending response '{response[:100]}...'" ) # Log truncated response
     return response
 
 # --- Incoming SMS Logic (from app.py) --- #
@@ -263,14 +325,14 @@ def incoming_sms():
 
     # --- Fetch current stock context ---
     current_stock = get_all_material_stock()
-    stock_context = "Current Stock Levels:\\n"
+    stock_context = "Current Stock Levels:\n"
     if current_stock:
-        stock_context += "\\n".join([f"- {item['name']}: {item['current_quantity']} {item['unit']}" for item in current_stock])
+        stock_context += "\n".join([f"- {item['name']}: {item['current_quantity']} {item['unit']}" for item in current_stock])
     else:
         stock_context += "Could not retrieve stock data."
     # --- Create prompt for Gemini ---
     # Combine context and user's message
-    prompt_for_ai = f"Context:\\n{stock_context}\\n\\nStock Level Definitions:\\n- Below Stock: Quantity < 50\\n- Sufficient Stock: Quantity >= 50\\n- High Stock: Quantity > 100\\n\\nUser Query:\\n{message_text}\\n\\n---\\nBased ONLY on the provided context, stock level definitions, and user query, answer the query concisely."
+    prompt_for_ai = f"Context:\n{stock_context}\n\nStock Level Definitions:\n- Below Stock: Quantity < 50\n- Sufficient Stock: Quantity >= 50\n- High Stock: Quantity > 100\n\nUser Query:\n{message_text}\n\n---\nBased ONLY on the provided context, stock level definitions, and user query, answer the query concisely."
 
 
     # Call Gemini API

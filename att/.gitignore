@@ -1,0 +1,10 @@
+# Environment variables (IMPORTANT: Contains secrets!)
+.env
+
+# SQLite Database
+construction.db
+*.db
+*.db-journal
+
+# Virtual environment folder
+venv/

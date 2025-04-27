@@ -17,12 +17,12 @@ chat_endpoint = "https://chat.africastalking.com/whatsapp/message/send"
 # --- Prepare Request --- #
 headers = {
     "Content-Type": "application/json",
-    "apiKey": API_KEY,
+    "apiKey": os.getenv('AT_API_KEY'),
     "Accept": "application/json"
 }
 
 data = {
-    "username": USERNAME,
+    "username": os.getenv('AT_USERNAME'),
     "waNumber": SENDER_WA_NUMBER,
     "phoneNumber": RECIPIENT_PHONE_NUMBER,
     "body": {
